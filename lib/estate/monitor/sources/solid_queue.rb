@@ -14,6 +14,8 @@ module Estate
 
       module_function
 
+      SLOWEST_LIMIT = 5
+
       def snapshot
         {
           processes: safe(:processes),
@@ -21,7 +23,8 @@ module Estate
           queues: safe(:queues),
           recurring: safe(:recurring),
           failures: safe(:failures),
-          totals: safe(:totals)
+          totals: safe(:totals),
+          timing: safe(:timing)
         }
       end
 
@@ -119,6 +122,46 @@ module Estate
           rescue StandardError
             nil
           end
+        }
+      end
+
+      # How long jobs are taking, from the rows Solid Queue already keeps.
+      #
+      # Turnaround rather than run time: created_at to finished_at is what the
+      # thing waiting on the job actually experienced, and it is the only span
+      # the schema can answer for — there is no started_at, so a job that sat in
+      # a queue for a minute and ran for a second is not distinguishable from
+      # one that ran for a minute, and pretending otherwise would be worse than
+      # saying the honest number.
+      #
+      # Read rather than counted, unlike the request histogram: these are rows
+      # that persist, so a window can simply be selected.
+      def timing
+        finished = finished_class
+                     .where(finished_at: 1.hour.ago..)
+                     .where.not(created_at: nil)
+                     .pluck(:class_name, :created_at, :finished_at)
+                     .filter_map do |name, created, done|
+                       next if created.nil? || done.nil?
+                       [ name, ((done - created) * 1000).round ]
+                     end
+
+        return { finished_last_hour: 0 } if finished.empty?
+
+        ms = finished.map(&:last).sort
+        {
+          finished_last_hour: finished.length,
+          turnaround_ms: {
+            p50: ms[(ms.length * 0.5).floor],
+            p90: ms[(ms.length * 0.9).floor] || ms.last,
+            max: ms.last
+          },
+          # By class rather than by job: five rows of the same nightly sweep say
+          # one thing, and the name is what somebody would go and look at.
+          slowest: finished.group_by(&:first)
+                           .map { |name, rows| { class_name: name, count: rows.length, max_ms: rows.map(&:last).max } }
+                           .sort_by { |r| -r[:max_ms] }
+                           .first(SLOWEST_LIMIT)
         }
       end
 

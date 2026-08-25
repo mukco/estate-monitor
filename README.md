@@ -99,6 +99,23 @@ traffic — by naming controller classes:
 Estate::Monitor::LatencySource.ignore += %w[Api::WebhooksController]
 ```
 
+**Waiting is separated from working.** Wrap a call to somebody else's service and
+its time is reported apart from the app's own:
+
+```ruby
+Estate::Monitor.external { http.request(request) }
+```
+
+`buckets_own` is then the same requests timed without that waiting, and
+`external_ms_total` is how much there was. An app that calls the gateway spends
+most of a slow request waiting — the mean completion there is fourteen seconds —
+so undivided, its p90 stops being a statement about the app and becomes "did an
+LLM call happen". The time is counted even when the call raises, because a
+gateway call that times out is the most expensive waiting there is.
+
+Apps that never call it report `buckets_own` identical to `buckets`, which is
+the truth: nothing was waited on.
+
 This section says how long things took. It does not say whether that is bad;
 thresholds belong to whoever watches the estate.
 
