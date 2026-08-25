@@ -1,3 +1,11 @@
 Gemfile.lock
 *.gem
 coverage/
+
+# Environment files, every variant. `.env` alone did not cover
+# `.env.production` / `.env.development`, which is the convention the estate
+# actually uses — so the files holding real credentials were exactly the ones
+# not ignored. Only the committed example is exempt.
+.env
+.env.*
+!.env.example
