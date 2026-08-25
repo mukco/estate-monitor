@@ -228,3 +228,75 @@ RSpec.describe Estate::Monitor::LatencySource do
     end
   end
 end
+
+RSpec.describe "#{Estate::Monitor::LatencySource} and waiting on somebody else" do
+  subject(:collector) { Estate::Monitor::LatencySource::Collector.new }
+
+  before { Estate::Monitor::LatencySource.take_external_ms }
+
+  describe "the block wrapper" do
+    it "returns whatever the call returned" do
+      expect(Estate::Monitor::LatencySource.external { :answer }).to eq(:answer)
+    end
+
+    it "counts the time it took" do
+      Estate::Monitor::LatencySource.external { sleep 0.02 }
+      expect(Estate::Monitor::LatencySource.take_external_ms).to be_within(15).of(20)
+    end
+
+    # A gateway call that times out is the most expensive waiting there is;
+    # losing it would flatter exactly the request that needs explaining.
+    it "counts it even when the call raised" do
+      expect { Estate::Monitor::LatencySource.external { raise "gateway timed out" } }.to raise_error("gateway timed out")
+      expect(Estate::Monitor::LatencySource.take_external_ms).to be > 0
+    end
+
+    it "adds up several calls in one request" do
+      2.times { Estate::Monitor::LatencySource.external { sleep 0.01 } }
+      expect(Estate::Monitor::LatencySource.take_external_ms).to be_within(15).of(20)
+    end
+
+    it "empties the clock when read, so nothing is counted twice" do
+      Estate::Monitor::LatencySource.external { sleep 0.01 }
+      Estate::Monitor::LatencySource.take_external_ms
+      expect(Estate::Monitor::LatencySource.take_external_ms).to eq(0.0)
+    end
+  end
+
+  describe "the two histograms" do
+    # The point of the split: one request, two true statements. The family
+    # waited 20 seconds; the app was busy for 40ms.
+    it "puts the same request in different buckets" do
+      collector.record(route: "GET api/games#factoids", duration_ms: 20_000, external_ms: 19_960)
+
+      snapshot = collector.snapshot[:requests]
+      expect(snapshot[:buckets]["30000"]).to eq(1)
+      expect(snapshot[:buckets]["10000"]).to eq(0)
+      # Without the gateway it was a 40ms request.
+      expect(snapshot[:buckets_own]["50"]).to eq(1)
+    end
+
+    it "leaves them identical when nothing was waited on" do
+      collector.record(route: "GET api/word#standings", duration_ms: 12)
+      snapshot = collector.snapshot[:requests]
+      expect(snapshot[:buckets_own]).to eq(snapshot[:buckets])
+    end
+
+    it "totals the waiting" do
+      collector.record(route: "GET a#b", duration_ms: 20_000, external_ms: 19_000)
+      collector.record(route: "GET a#b", duration_ms: 5_000, external_ms: 4_000)
+      expect(collector.snapshot[:requests][:external_ms_total]).to eq(23_000)
+    end
+
+    it "attributes the waiting to the route that did it" do
+      collector.record(route: "GET api/games#factoids", duration_ms: 20_000, external_ms: 19_960)
+      expect(collector.snapshot[:routes].first[:external_ms_total]).to eq(19_960)
+    end
+
+    # A clock is not a ledger; two monotonic reads can disagree by a hair.
+    it "never invents a request faster than instant" do
+      collector.record(route: "GET a#b", duration_ms: 10, external_ms: 12)
+      expect(collector.snapshot[:requests][:buckets_own]["5"]).to eq(1)
+    end
+  end
+end

@@ -47,6 +47,12 @@ module Estate
       end
     end
 
+    # The name apps call at their one gateway call site. Delegated so the
+    # caller never has to know which source is counting, or that one is.
+    def self.external(&block)
+      LatencySource.external(&block)
+    end
+
     def self.authorized?(authorization_header, configured)
       return false if configured.blank?
 

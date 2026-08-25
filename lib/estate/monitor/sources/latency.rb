@@ -60,6 +60,19 @@ module Estate
 
       BOOTED_AT = Time.now
 
+      # Where a request's time went while it was not this app's fault.
+      #
+      # An app that calls the gateway spends most of a slow request waiting: the
+      # gateway's own numbers put the mean completion at fourteen seconds. Left
+      # undivided, the p90 of any app that talks to it stops being a statement
+      # about the app and becomes "did an LLM call happen", which is already
+      # visible from the route name and tells nobody whether the app regressed.
+      #
+      # Per thread because Puma gives a request a thread and this is read at the
+      # end of one. Reset at the start rather than only after: a job on the same
+      # thread also calls the gateway, and its waiting is not the next request's.
+      THREAD_KEY = :estate_monitor_external_ms
+
       class << self
         # Apps can add their own — an internal callback endpoint, a webhook
         # receiver that is somebody else's traffic. Replaces rather than
@@ -88,16 +101,27 @@ module Estate
             # One slot per boundary plus a final slot for everything above the
             # last one, so a 45-second request still lands somewhere.
             @histogram = Array.new(BUCKETS.length + 1, 0)
+            # The same requests, timed without whatever they were waiting on.
+            # Kept beside the first rather than replacing it: one answers "how
+            # long did the family wait", the other "was that us".
+            @own_histogram = Array.new(BUCKETS.length + 1, 0)
+            @external_ms = 0.0
             @status = Hash.new(0)
-            @routes = Hash.new { |h, k| h[k] = { count: 0, ms_total: 0.0, db_ms_total: 0.0, max_ms: 0.0, over_limit: 0 } }
+            @routes = Hash.new do |h, k|
+              h[k] = { count: 0, ms_total: 0.0, db_ms_total: 0.0, external_ms_total: 0.0, max_ms: 0.0, over_limit: 0 }
+            end
           end
         end
 
         # Called once per request, off the notification. Kept to arithmetic on
         # purpose: it runs inside the request's own thread, so anything slow
         # here is added to the very number it is trying to measure.
-        def record(route:, duration_ms:, db_ms: 0.0, view_ms: 0.0, queries: 0, status: nil, exception: false)
+        def record(route:, duration_ms:, db_ms: 0.0, view_ms: 0.0, queries: 0, status: nil,
+                   exception: false, external_ms: 0.0)
           slot = bucket_for(duration_ms)
+          # Never negative: a clock is not a ledger, and a rounding difference
+          # between two monotonic reads should not invent a faster request.
+          own_slot = bucket_for([ duration_ms - external_ms, 0.0 ].max)
 
           @mutex.synchronize do
             @total += 1
@@ -107,12 +131,15 @@ module Estate
             @queries += queries
             @exceptions += 1 if exception
             @histogram[slot] += 1
+            @own_histogram[own_slot] += 1
+            @external_ms += external_ms
             @status[status_class(status)] += 1
 
             r = @routes[route]
             r[:count] += 1
             r[:ms_total] += duration_ms
             r[:db_ms_total] += db_ms
+            r[:external_ms_total] += external_ms
             r[:max_ms] = duration_ms if duration_ms > r[:max_ms]
             r[:over_limit] += 1 if duration_ms >= BUCKETS.last
           end
@@ -128,8 +155,10 @@ module Estate
                 db_ms_total: @db_ms.round,
                 view_ms_total: @view_ms.round,
                 query_count_total: @queries,
+                external_ms_total: @external_ms.round,
                 exceptions: @exceptions,
-                buckets: cumulative_buckets,
+                buckets: cumulative_buckets(@histogram),
+                buckets_own: cumulative_buckets(@own_histogram),
                 by_status: @status.sort.to_h
               },
               routes: top_routes
@@ -142,14 +171,14 @@ module Estate
         # Cumulative ("how many were at or under this"), which is what makes a
         # percentile a single scan and a merge a plain addition. `+Inf` is the
         # total by definition, and is emitted so a reader never has to know that.
-        def cumulative_buckets
+        def cumulative_buckets(histogram)
           running = 0
           out = {}
           BUCKETS.each_with_index do |boundary, i|
-            running += @histogram[i]
+            running += histogram[i]
             out[boundary.to_s] = running
           end
-          out["+Inf"] = running + @histogram.last
+          out["+Inf"] = running + histogram.last
           out
         end
 
@@ -160,6 +189,7 @@ module Estate
             .map do |route, v|
               { route: route, count: v[:count],
                 ms_total: v[:ms_total].round, db_ms_total: v[:db_ms_total].round,
+                external_ms_total: v[:external_ms_total].round,
                 max_ms: v[:max_ms].round, over_limit: v[:over_limit] }
             end
         end
@@ -181,6 +211,30 @@ module Estate
 
       module_function
 
+      # Wrap a call to somebody else's service. The time inside is still part of
+      # the request — the family waited for it — but it is reported separately
+      # so "the app got slower" and "the thing it waits on got slower" are two
+      # different sentences.
+      #
+      #   Estate::Monitor.external { http.request(request) }
+      #
+      # Returns whatever the block returns, and counts the time even when the
+      # block raises: a gateway call that times out is the most expensive
+      # waiting there is, and losing it would flatter exactly the wrong request.
+      def external
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        yield
+      ensure
+        elapsed = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
+        Thread.current[THREAD_KEY] = Thread.current[THREAD_KEY].to_f + elapsed
+      end
+
+      def take_external_ms
+        ms = Thread.current[THREAD_KEY].to_f
+        Thread.current[THREAD_KEY] = 0.0
+        ms
+      end
+
       def collector
         @collector ||= Collector.new
       end
@@ -197,6 +251,12 @@ module Estate
       # request would otherwise report a negative duration.
       def subscribe!(notifications = ActiveSupport::Notifications)
         return if @subscribed
+
+        # Zero the waiting clock as the request begins. Without this a job that
+        # called the gateway on this thread would hand its fourteen seconds to
+        # whichever request the thread picked up next, and that request would
+        # report itself as almost entirely somebody else's fault.
+        notifications.subscribe("start_processing.action_controller") { take_external_ms }
 
         @subscribed = notifications.monotonic_subscribe("process_action.action_controller") do |*args|
           event = ActiveSupport::Notifications::Event.new(*args)
@@ -216,7 +276,8 @@ module Estate
           # Rails 7.1+ reports this; older payloads simply do not carry it.
           queries: payload.dig(:db_runtime_queries).to_i,
           status: payload[:status],
-          exception: payload[:exception].present?
+          exception: payload[:exception].present?,
+          external_ms: take_external_ms
         )
       rescue StandardError # rubocop:disable Lint/SuppressedException
         # A reporter must never be the reason a request fails. Losing one
