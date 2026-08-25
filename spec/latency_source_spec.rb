@@ -142,12 +142,64 @@ RSpec.describe Estate::Monitor::LatencySource do
     # route wearing two ids. Keying on the path hides that and lets an
     # unbounded set of ids into memory.
     it "collapses ids by keying on controller#action" do
-      expect(described_class.route_for({ method: "GET", controller: "api/games", action: "factoids" }))
+      expect(described_class.route_for({ method: "GET", controller: "Api::GamesController", action: "factoids" }))
         .to eq("GET api/games#factoids")
+    end
+
+    # The notification carries a class name; Rails writes the same thing as a
+    # path everywhere else, and that is what a routes file looks like.
+    it "reads the class name back as the path Rails itself uses" do
+      expect(described_class.controller_path("Api::NotificationsController")).to eq("api/notifications")
+      expect(described_class.controller_path("Dinner::RecipeIngredientsController")).to eq("dinner/recipe_ingredients")
     end
 
     it "does not raise on a payload missing its controller" do
       expect(described_class.route_for({})).to eq("? unknown#unknown")
+    end
+  end
+
+  describe "what it refuses to count" do
+    around do |example|
+      previous = described_class.ignore
+      example.run
+      described_class.ignore = previous
+    end
+
+    # kamal-proxy probing /up on a timer is not what anybody means by "how long
+    # do our requests take". It always answers in a millisecond or two, and on a
+    # quiet app it is most of the traffic — 8 of 19 requests when this was
+    # measured on the hub. Left in, the median describes /up, not the app.
+    it "ignores the health endpoint the proxy polls" do
+      event = instance_double(ActiveSupport::Notifications::Event,
+                              payload: { controller: "Rails::HealthController", action: "show", method: "GET", status: 200 },
+                              duration: 2.0)
+      expect { described_class.record_event(event) }
+        .not_to change { described_class.collector.snapshot[:requests][:total] }
+    end
+
+    it "ignores its own endpoint, so reading the counters does not inflate them" do
+      event = instance_double(ActiveSupport::Notifications::Event,
+                              payload: { controller: "Estate::Monitor::MetricsController", action: "show", method: "GET", status: 200 },
+                              duration: 3.0)
+      expect { described_class.record_event(event) }
+        .not_to change { described_class.collector.snapshot[:requests][:total] }
+    end
+
+    it "counts an ordinary controller" do
+      event = instance_double(ActiveSupport::Notifications::Event,
+                              payload: { controller: "Api::WordController", action: "standings", method: "GET", status: 200 },
+                              duration: 12.0)
+      expect { described_class.record_event(event) }
+        .to change { described_class.collector.snapshot[:requests][:total] }.by(1)
+    end
+
+    it "lets an app name its own" do
+      described_class.ignore = [ "Api::WebhooksController" ]
+      event = instance_double(ActiveSupport::Notifications::Event,
+                              payload: { controller: "Api::WebhooksController", action: "create", method: "POST", status: 204 },
+                              duration: 9.0)
+      expect { described_class.record_event(event) }
+        .not_to change { described_class.collector.snapshot[:requests][:total] }
     end
   end
 
