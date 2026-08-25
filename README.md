@@ -35,7 +35,7 @@ end
   "generated_at": "…",
   "sections": {
     "runtime":     { "sha": "…", "booted_at": "…", "db_ping": { "status": "ok" } },
-    "solid_queue": { "processes": …, "queues": …, "recurring": …, "failures": …, "totals": … },
+    "solid_queue": { "processes": …, "running": …, "queues": …, "recurring": …, "failures": …, "totals": … },
     "latency":     { "since": "…", "requests": { … }, "routes": [ … ] }
   }
 }
