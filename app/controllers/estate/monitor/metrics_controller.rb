@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require_relative "../../../lib/estate/monitor"
-
 module Estate
   module Monitor
     class MetricsController < ApplicationController
