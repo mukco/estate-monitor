@@ -43,7 +43,33 @@ module Estate
       # rare" — both are ways to spend a budget.
       TOP_ROUTES = 15
 
+      # Infrastructure talking to the app, which is not what anybody means by
+      # "how long do our requests take".
+      #
+      # The health endpoint is the biggest offender: kamal-proxy probes it on a
+      # timer, it always answers in a millisecond or two, and on a quiet app it
+      # is most of the traffic — measured at 8 of 19 requests on the hub. Left
+      # in, the median stops describing the app and starts describing /up.
+      #
+      # The reporter's own endpoint goes too. Counting the scrape that reads the
+      # counters means every aggregator visit inflates the thing it came to read.
+      DEFAULT_IGNORE = [
+        "Rails::HealthController",
+        "Estate::Monitor::MetricsController"
+      ].freeze
+
       BOOTED_AT = Time.now
+
+      class << self
+        # Apps can add their own — an internal callback endpoint, a webhook
+        # receiver that is somebody else's traffic. Replaces rather than
+        # appends, so a caller that wants the defaults keeps them explicitly.
+        attr_writer :ignore
+
+        def ignore
+          @ignore ||= DEFAULT_IGNORE.dup
+        end
+      end
 
       class Collector
         def initialize
@@ -180,6 +206,8 @@ module Estate
 
       def record_event(event)
         payload = event.payload
+        return if ignored?(payload[:controller])
+
         collector.record(
           route: route_for(payload),
           duration_ms: event.duration,
@@ -195,14 +223,32 @@ module Estate
         # sample is not worth raising inside somebody else's controller.
       end
 
+      def ignored?(controller)
+        controller.present? && ignore.include?(controller)
+      end
+
       # controller#action, not the path. `/api/games/824962/factoids` and
       # `/api/games/401873291/factoids` are one route wearing two ids; keying on
       # the path both hides that and lets an unbounded set of ids into memory.
+      #
+      # The notification carries the controller's class name, so it is put back
+      # into the form Rails itself uses everywhere else — `api/games#factoids`
+      # rather than `Api::GamesController#factoids`. Same information, and it
+      # reads like the routes file it came from.
       def route_for(payload)
         verb = payload[:method] || "?"
-        controller = payload[:controller] || "unknown"
         action = payload[:action] || "unknown"
-        "#{verb} #{controller}##{action}"
+        "#{verb} #{controller_path(payload[:controller])}##{action}"
+      end
+
+      def controller_path(name)
+        return "unknown" if name.nil? || name.to_s.empty?
+
+        name.to_s
+            .sub(/Controller\z/, "")
+            .gsub("::", "/")
+            .gsub(/([a-z\d])([A-Z])/, '\1_\2')
+            .downcase
       end
     end
   end

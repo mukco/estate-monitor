@@ -85,6 +85,20 @@ counts requests at or beyond it, which are the ones the timeout kills.
 counted; the top 15 by total time are serialised — total rather than max, which
 is what surfaces "fast but constant" next to "slow and rare".
 
+**Infrastructure is not counted.** `Rails::HealthController` and this gem's own
+metrics endpoint are ignored by default. kamal-proxy probes `/up` on a timer and
+it always answers in a millisecond or two — on a quiet app that was 8 of 19
+requests, enough that the median described `/up` rather than the app. Counting
+the scrape that reads the counters has the same problem in reverse: every
+aggregator visit would inflate what it came to read.
+
+Add your own — an internal callback, a webhook receiver that is somebody else's
+traffic — by naming controller classes:
+
+```ruby
+Estate::Monitor::LatencySource.ignore += %w[Api::WebhooksController]
+```
+
 This section says how long things took. It does not say whether that is bad;
 thresholds belong to whoever watches the estate.
 
