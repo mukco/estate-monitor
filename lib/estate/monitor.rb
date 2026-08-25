@@ -6,17 +6,21 @@ require "active_support/core_ext/module/attribute_accessors"
 require_relative "monitor/version"
 require_relative "monitor/sources/runtime"
 require_relative "monitor/sources/solid_queue"
+require_relative "monitor/sources/latency"
 
 module Estate
   module Monitor
     mattr_accessor :token, :app_name
 
-    CONTRACT_VERSION = 2
+    # 3 adds the `latency` section. Additive: a v2 reader that has never heard
+    # of it keeps working on the sections it does know.
+    CONTRACT_VERSION = 3
 
     def self.sources
       @sources ||= [
         [:runtime, -> { RuntimeSource.snapshot }],
-        [:solid_queue, -> { SolidQueueSource.snapshot }]
+        [:solid_queue, -> { SolidQueueSource.snapshot }],
+        [:latency, -> { LatencySource.snapshot }]
       ]
     end
 
