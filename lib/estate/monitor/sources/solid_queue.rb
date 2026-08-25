@@ -8,6 +8,8 @@ module Estate
     module SolidQueueSource
       STALE_HEARTBEAT = 5.minutes
       FAILURE_LIMIT = 10
+      # Enough to see what is wedged; past that, the count is the story.
+      RUNNING_LIMIT = 20
       MAX_ARGUMENTS_LENGTH = 300
 
       module_function
@@ -15,6 +17,7 @@ module Estate
       def snapshot
         {
           processes: safe(:processes),
+          running: safe(:running),
           queues: safe(:queues),
           recurring: safe(:recurring),
           failures: safe(:failures),
@@ -45,6 +48,31 @@ module Estate
         count_by_queue(claimed_class).each { |q, n| counts[q][:claimed] = n }
         failed = count_by_queue(failed_class)
         counts.keys.union(failed.keys).sort.to_h { |q| [q, counts[q].merge(failed: failed[q] || 0)] }
+      end
+
+      # What is in flight *right now*, by name.
+      #
+      # totals[:claimed] has always said how many, and a number is what stands
+      # in front of the question anybody actually has. "claimed: 3" cannot tell
+      # you that all three are the same import, wedged since breakfast.
+      #
+      # A claimed execution joins back to its job, so the class and queue are
+      # one hop away, and the claim's own created_at is when a worker picked it
+      # up — which is the age worth showing, because a job claimed forty
+      # minutes ago is the one to go and look at.
+      def running(limit = RUNNING_LIMIT)
+        rows = claimed_class.includes(:job).order(created_at: :asc).limit(limit).filter_map do |claim|
+          job = claim.job
+          next if job.nil?
+
+          {
+            class_name: job.class_name,
+            queue: job.queue_name,
+            claimed_at: claim.created_at&.utc&.iso8601,
+            process_id: (claim.process_id if claim.respond_to?(:process_id))
+          }.compact
+        end
+        { count: claimed_class.count, rows: rows }
       end
 
       def recurring
