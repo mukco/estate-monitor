@@ -55,3 +55,5 @@ module Estate
 end
 
 require_relative "monitor/client"
+
+require_relative "monitor/engine"
