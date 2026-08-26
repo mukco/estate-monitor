@@ -12,9 +12,12 @@ module Estate
   module Monitor
     mattr_accessor :token, :app_name
 
-    # 3 adds the `latency` section. Additive: a v2 reader that has never heard
-    # of it keeps working on the sections it does know.
-    CONTRACT_VERSION = 3
+    # 4 adds `recent`, `failure_counts` and `retention` to the solid_queue
+    # section, and starts answering two things v3 only pretended to: every
+    # `recurring[].last_enqueued_at` was null and `timing` was a NameError.
+    # Additive: a v3 reader that has never heard of the new keys keeps working
+    # on the sections it does know.
+    CONTRACT_VERSION = 4
 
     def self.sources
       @sources ||= [
