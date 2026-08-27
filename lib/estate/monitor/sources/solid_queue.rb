@@ -284,8 +284,15 @@ module Estate
       # Solid Queue deletes finished jobs older than this, and a recurring
       # execution goes with the job it enqueued. Without the number, a reader
       # cannot tell "this weekly task has never run" from "this weekly task ran
-      # on Sunday and Sunday has been swept". Nil where the app has no sweep
-      # configured, which means the history goes back to the first deploy.
+      # on Sunday and Sunday has been swept".
+      #
+      # It is the configured window, not a measurement: `clear_finished_jobs_after`
+      # defaults to a day whether or not anything is scheduled to act on it, so an
+      # app with no sweep reports 86400 while in fact keeping everything for ever.
+      # Family Hub did exactly that until it was given the sweep the other four
+      # already had. The error is in the safe direction — a reader forgives a gap
+      # that was not really swept — but do not read this as "rows older than this
+      # are gone".
       def retention
         configured = defined?(::SolidQueue) && ::SolidQueue.respond_to?(:clear_finished_jobs_after)
         { finished_jobs_after_seconds: (::SolidQueue.clear_finished_jobs_after&.to_i if configured) }

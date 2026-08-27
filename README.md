@@ -93,6 +93,12 @@ so a task that fired outside `retention` reports null, meaning "no run on
 record" rather than "never ran". `due_at` is when the schedule last came due;
 comparing the two is the reader's job, not this gem's.
 
+`retention` is the configured window and not a measurement.
+`clear_finished_jobs_after` defaults to a day whether or not anything is
+scheduled to act on it, so an app with no sweep reports 86400 while in fact
+keeping everything for ever. The error is in the forgiving direction, but do
+not read it as "rows older than this are gone".
+
 This section says what happened. It does not say whether that is bad;
 thresholds belong to whoever watches the estate.
 
