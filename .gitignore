@@ -9,3 +9,6 @@ coverage/
 .env
 .env.*
 !.env.example
+
+# Booting a Rails application in the specs writes a secret_key_base here.
+tmp/

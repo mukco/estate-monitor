@@ -1,0 +1,5 @@
+# The schema is loaded into memory by spec/support/solid_queue.rb; nothing is
+# written to disk and there is no database to create before running the specs.
+test:
+  adapter: sqlite3
+  database: ":memory:"

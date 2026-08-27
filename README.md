@@ -31,11 +31,12 @@ end
 ```json
 {
   "app": "Baseball",
-  "version": 3,
+  "version": 4,
   "generated_at": "…",
   "sections": {
     "runtime":     { "sha": "…", "booted_at": "…", "db_ping": { "status": "ok" } },
-    "solid_queue": { "processes": …, "running": …, "queues": …, "recurring": …, "failures": …, "totals": … },
+    "solid_queue": { "processes": …, "running": …, "recent": …, "queues": …, "recurring": …,
+                     "failures": …, "failure_counts": …, "totals": …, "timing": …, "retention": … },
     "latency":     { "since": "…", "requests": { … }, "routes": [ … ] }
   }
 }
@@ -43,6 +44,57 @@ end
 
 Every section is individually rescued; an app without Solid Queue reports
 `{ "unavailable": reason }` for that section instead of failing the payload.
+
+## Solid Queue
+
+```json
+"solid_queue": {
+  "processes": { "count": 4, "stale_count": 0, "rows": [ … ] },
+  "running":   { "count": 1, "rows": [ { "class_name": "WarmOttoneuCacheJob",
+                                         "queue": "cache_warming", "claimed_at": "…" } ] },
+  "recent":    { "count": 25, "rows": [ { "class_name": "RefreshLiveJob", "queue": "background",
+                                          "finished_at": "…", "turnaround_ms": 1840 } ] },
+  "queues":    { "cache_warming": { "ready": 0, "claimed": 2, "failed": 13 } },
+  "recurring": [ { "key": "warm_cache", "schedule": "every 30 minutes",
+                   "last_enqueued_at": "…", "due_at": "…" } ],
+  "failures":  [ { "class_name": "WarmAnswersJob", "queue": "cache_warming", "failed_at": "…",
+                   "error_class": "SolidQueue::Processes::ProcessPrunedError",
+                   "error_message": "Process was found dead and pruned (last heartbeat at: …)",
+                   "pruned": true } ],
+  "failure_counts": { "total": 16, "last_24h": 1, "last_7d": 6, "pruned": 15 },
+  "totals":    { "ready": 0, "claimed": 1, "failed": 16, "finished_last_24h": 812 },
+  "timing":    { "finished_last_hour": 41, "turnaround_ms": { "p50": 120, "p90": 2100, "max": 9400 },
+                 "slowest": [ { "class_name": "WarmSimulationCacheJob", "count": 2, "max_ms": 9400 } ] },
+  "retention": { "finished_jobs_after_seconds": 86400 }
+}
+```
+
+Four things are worth knowing before reading it:
+
+**An instant is not a history.** `ready`, `claimed` and `failed` describe the
+moment of the scrape. A reader polls once a minute and most jobs take seconds,
+so `running` is usually empty even on an app doing hundreds of jobs an hour —
+a queue that has run four hundred jobs today looks exactly like one that has
+run none. `recent` and `timing` are the log of the work, and are what "is the
+nightly warm still happening" actually asks for.
+
+**The lifetime failure count is an archive.** Nothing deletes a failed
+execution, so `totals[:failed]` counts every failure since the table was
+created and only ever grows. `failure_counts` is the same rows over windows.
+
+**Most failures are not the job's fault.** Solid Queue files a claim whose
+worker stopped answering as a failure, so every deploy through a nightly warm
+produces one. Those rows carry `pruned: true`, and `failure_counts[:pruned]`
+counts them, so a real error is not buried in container churn.
+
+**A missing last run may be a swept one.** `recurring[].last_enqueued_at` comes
+from the recurring executions, and one is deleted with the job it enqueued —
+so a task that fired outside `retention` reports null, meaning "no run on
+record" rather than "never ran". `due_at` is when the schedule last came due;
+comparing the two is the reader's job, not this gem's.
+
+This section says what happened. It does not say whether that is bad;
+thresholds belong to whoever watches the estate.
 
 ## Latency
 
