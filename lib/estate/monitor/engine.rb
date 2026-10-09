@@ -16,6 +16,22 @@ module Estate
           Estate::Monitor::LatencySource.subscribe!
         end
       end
+
+      # 2026-10-09: server-side error capture. Always subscribed — it costs a
+      # method call per reported error — and the subscriber checks
+      # `reporting?` each time, so a token set later in boot, or a spec that
+      # turns reporting on, takes effect without re-subscribing.
+      initializer "estate_monitor.subscribe_errors" do
+        Estate::Monitor::Engine.subscribe_errors!
+      end
+
+      def self.subscribe_errors!
+        return if @errors_subscribed
+        return unless defined?(::Rails.error) && ::Rails.error.respond_to?(:subscribe)
+
+        ::Rails.error.subscribe(Estate::Monitor::Errors::Subscriber.new)
+        @errors_subscribed = true
+      end
     end
   end
 end
