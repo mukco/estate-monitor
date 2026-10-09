@@ -4,16 +4,23 @@ One JSON reporter per Rails app covering everything the app itself knows:
 runtime facts, Solid Queue state, and custom sources. Mount it, set a token,
 and the estate dashboard can see your workers.
 
+Since 0.7 it also reports errors and deliberate log lines — from the browser,
+from unhandled request and job failures, and from the app on purpose — to the
+estate's Errors panel. See [Errors](#errors).
+
 ## Install
 
 ```ruby
-gem "estate-monitor", github: "mukco/estate-monitor", tag: "v0.2.0"
+gem "estate-monitor", github: "mukco/estate-monitor", tag: "v0.7.0"
 ```
 
 ```ruby
 # config/routes.rb
-mount Estate::Monitor::Engine => "/internal/metrics"
+mount Estate::Monitor::Engine => "/internal/metrics"     # bearer-gated, for the estate
+mount Estate::Monitor::ErrorsApp => "/internal/errors"   # open, for the app's own pages
 ```
+
+Mount both above any SPA catch-all route.
 
 Configure (initializer or before mount):
 
@@ -21,8 +28,13 @@ Configure (initializer or before mount):
 Estate::Monitor.configure do |config|
   config.token    = ENV["ESTATE_MONITOR_TOKEN"]
   config.app_name = "Baseball"
+  # Optional, for error reports — see Errors.
+  config.current_user_id = ->(request) { request.session[:user_id] }
 end
 ```
+
+(`configure` was documented here before it existed; from 0.7 it does. Setting
+`Estate::Monitor.token = …` directly still works.)
 
 ## Payload
 
@@ -37,7 +49,8 @@ end
     "runtime":     { "sha": "…", "booted_at": "…", "db_ping": { "status": "ok" } },
     "solid_queue": { "processes": …, "running": …, "recent": …, "queues": …, "recurring": …,
                      "failures": …, "failure_counts": …, "totals": …, "timing": …, "retention": … },
-    "latency":     { "since": "…", "requests": { … }, "routes": [ … ] }
+    "latency":     { "since": "…", "requests": { … }, "routes": [ … ] },
+    "errors":      { "pending": 0, "delivered": 12, "events": [ … ] }
   }
 }
 ```
@@ -176,6 +189,105 @@ the truth: nothing was waited on.
 
 This section says how long things took. It does not say whether that is bad;
 thresholds belong to whoever watches the estate.
+
+## Errors
+
+Added in 0.7 (contract v5). Three ways in, one way out:
+
+```
+browser / TV ──POST /internal/errors──┐
+Rails.error (requests, jobs) ─────────┼─▶ stamp ─▶ buffer ─▶ POST {ESTATE_URL}/api/ingest/events
+Estate::Monitor.report ───────────────┘                 └──▶ `errors` section of /internal/metrics
+```
+
+### Config
+
+| Setting | Default | |
+|---|---|---|
+| `token` | — | The existing `ESTATE_MONITOR_TOKEN`. No token, no reporting. |
+| `estate_url` | `ENV["ESTATE_URL"]` or `https://estate.edwardsfamily.app` | |
+| `enabled` | `nil` = on when there is a token, except in test | `true` in a spec that wants to see events |
+| `current_user_id` | `nil` | `->(request) { … }` → the signed-in user's id or nil. Raising means nil. |
+| `ignored_exceptions` | `RoutingError`, `RecordNotFound`, `InvalidAuthenticityToken`, `UnknownFormat` | Class names; subclasses match too |
+| `release` | the runtime sha (`SOURCE_VERSION` / `KAMAL_VERSION` / `/rails/.git-sha`) | string or lambda |
+
+Apps behind the WARP `HTTPS_PROXY` must add `estate.edwardsfamily.app` to
+`NO_PROXY`; until they do, `errors.last_error` in the metrics says why pushes
+fail, and the scrape collects the events instead.
+
+`current_user_id` gets an `ActionDispatch::Request` — from the browser
+endpoint, or the request an unhandled error happened in. The session is there
+if the app has session middleware:
+
+```ruby
+config.current_user_id = ->(request) { request.session[:user_id] }                     # cookie session
+config.current_user_id = ->(request) { request.env["warden"]&.user&.id }               # Devise
+config.current_user_id = ->(request) { request.cookie_jar.signed[:user_id] }            # signed cookie
+```
+
+### Browser endpoint
+
+`POST /internal/errors`, a plain Rack app — so no login, no CSRF, and nothing
+in `ApplicationController` can reach it. Body `{ "events": [Event, …] }`, as
+JSON or as a `navigator.sendBeacon` text/plain string. At most 10 events and
+64 KB per request, 30 events a minute per client address (in-process; excess
+dropped). Always `202 {}` — rate-limited, oversized and disabled included —
+except `400` for a body that is not JSON. A browser may say `source: "client"`
+or `"tv"`, never `"server"`. `@mukco/ui-kit/observability` is the client.
+
+Each event is stamped with `app`, `release`, `user_id`, `ip_hash` (first 12
+hex of sha256 of the address and a daily salt derived from the token),
+`received_at` and `host` (the container's hostname).
+
+### Server-side
+
+Subscribed to `Rails.error` by the engine, nothing to configure. Unhandled
+request errors arrive as `level: error, source: server, kind: exception` with
+`route`, `method` and `action` in the context; job failures as `source: job,
+kind: job` with `job`, `queue`, `job_id`, `executions`. `Rails.error.report(e,
+severity: :warning)` → `warning`, `:info` → `info`; `Rails.error.handle { }`
+is Rails' default for a handled error, `warning`. The stack is the app's own
+frames first, then the rest, 40 lines, relative to the app root.
+
+### On purpose
+
+```ruby
+Estate::Monitor.report(:warning, "Lidarr refused import", context: { album: album.title })
+Estate::Monitor.report(:error, exception, context: { feed: feed.id })
+Estate::Monitor.report(:info, "Nightly warm finished", context: { games: 14 }, fingerprint: "nightly-warm")
+```
+
+Returns the event_id, or nil when reporting is off; never raises. Inside a
+request or job it picks up the route, job and user like an unhandled error.
+Strings are `kind: manual`. The ignore list does not apply.
+
+### Delivery
+
+One buffer per process, flushed by a background thread every 2 s or at once
+at 20 events, in batches of at most 50 events / 512 KB. A failed push keeps
+the events and backs off (2 s doubling to 5 min); the buffer holds 500 and
+drops the oldest. A `429` or `413` lets the batch go — the estate has already
+counted it, and resending only spends more of the budget. The thread starts
+on the first event in each process, so Puma workers and Solid Queue's forked
+processes each run their own; a forked child starts with an empty buffer.
+
+### The `errors` section
+
+```json
+"errors": {
+  "pending": 3, "delivered": 120, "dropped": 0, "rejected": 0,
+  "consecutive_failures": 4, "last_delivered_at": "…",
+  "last_error": "Errno::ECONNREFUSED: …", "last_error_at": "…",
+  "events": [ { "event_id": "…", "level": "error", "source": "server", "message": "…",
+                "app": "Baseball", "release": "…", "user_id": 7, "ip_hash": "…",
+                "received_at": "…", "host": "…", "occurred_at": "…", "context": { … } } ]
+}
+```
+
+Undelivered events, oldest first, at most 100 / 256 KB per scrape. Each is
+shown to two scrapes and then dropped from the buffer — the second showing
+covers a scrape whose response was lost. Pushes keep retrying meanwhile, so
+the estate must dedupe on `event_id`.
 
 ## Client
 

@@ -18,7 +18,12 @@ ENV["RAILS_ENV"] ||= "test"
 require "rails"
 require "active_record/railtie"
 require "active_job/railtie"
+# The error-reporting specs drive real requests through the same application
+# (see spec/support/errors.rb), so it boots with Action Controller and with
+# the engine loaded as an app would load it.
+require "action_controller/railtie"
 require "solid_queue"
+require "estate/monitor"
 
 module EstateMonitorSpec
   class Application < Rails::Application

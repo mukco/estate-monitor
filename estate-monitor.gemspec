@@ -6,7 +6,7 @@ Gem::Specification.new do |spec|
   spec.name          = "estate-monitor"
   spec.version       = Estate::Monitor::VERSION
   spec.authors       = ["Devoun Edwards"]
-  spec.summary       = "Per-app monitoring reporter for the estate: runtime, Solid Queue, and custom sources."
+  spec.summary       = "Per-app monitoring reporter for the estate: runtime, Solid Queue, custom sources, and errors."
   spec.description   = "Mount a token-gated /internal/metrics endpoint reporting runtime facts, " \
                        "Solid Queue processes/queues/recurring/failures, and any custom " \
                        "sources the app registers. Includes a client for aggregators."
