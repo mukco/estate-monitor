@@ -25,6 +25,19 @@ module Estate
         Estate::Monitor::Engine.subscribe_errors!
       end
 
+      # 2026-10-09: stale pages. Just below ActionDispatch::Static, so a file
+      # that exists never reaches it and the 404 it sees for one that does not
+      # is the app's final answer; at the very top for an app that serves no
+      # files itself. Always inserted — it reads its settings per request, so
+      # turning it off is `report_stale_assets = false`, not a middleware edit.
+      initializer "estate_monitor.stale_assets" do |app|
+        if app.config.public_file_server.enabled
+          app.config.middleware.insert_after ::ActionDispatch::Static, Estate::Monitor::StaleAssets
+        else
+          app.config.middleware.insert_before 0, Estate::Monitor::StaleAssets
+        end
+      end
+
       def self.subscribe_errors!
         return if @errors_subscribed
         return unless defined?(::Rails.error) && ::Rails.error.respond_to?(:subscribe)

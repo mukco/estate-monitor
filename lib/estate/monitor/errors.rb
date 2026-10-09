@@ -47,10 +47,14 @@ module Estate
 
         # Stamps a normalized event and hands it to delivery. Returns the
         # event_id, or nil when nothing was recorded.
-        def record(event, request: nil, user_id: nil)
+        #
+        # `ip` is for a caller that has outlived its request — StaleAssets
+        # reports seconds after the response went out — and so took the
+        # address while it still had one.
+        def record(event, request: nil, user_id: nil, ip: nil)
           return nil if event.nil? || !Monitor.reporting?
 
-          delivery.push(stamp(event, request: request, user_id: user_id))
+          delivery.push(stamp(event, request: request, user_id: user_id, ip: ip))
         rescue StandardError
           nil
         end
@@ -58,12 +62,12 @@ module Estate
         # What the server knows that the sender does not, or should not be
         # trusted to say: which app and release, who was signed in, roughly
         # where from, and when it actually arrived.
-        def stamp(event, request: nil, user_id: nil)
+        def stamp(event, request: nil, user_id: nil, ip: nil)
           event.merge(
             "app" => Monitor.resolved_app_name,
             "release" => Monitor.resolved_release,
             "user_id" => user_id.nil? ? user_id_for(request) : user_id,
-            "ip_hash" => ip_hash(ip_for(request)),
+            "ip_hash" => ip_hash(ip || ip_for(request)),
             "received_at" => Time.now.utc.iso8601(3),
             "host" => HOST
           )
@@ -133,9 +137,9 @@ module Estate
           record(event, request: request, user_id: user_id)
         end
 
-        # A sentence, from Monitor.report.
+        # A sentence, from Monitor.report or StaleAssets.
         def capture_message(message, level:, source:, kind:, context: {}, request: nil,
-                            user_id: nil, fingerprint: nil)
+                            user_id: nil, fingerprint: nil, ip: nil)
           event = Event.normalize(
             {
               "level" => level, "source" => source, "message" => message.to_s,
@@ -144,7 +148,7 @@ module Estate
             },
             default_source: "server"
           )
-          record(event, request: request, user_id: user_id)
+          record(event, request: request, user_id: user_id, ip: ip)
         end
 
         # The app's own frames first, then everything else, forty in all,

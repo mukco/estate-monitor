@@ -6,12 +6,14 @@ and the estate dashboard can see your workers.
 
 Since 0.7 it also reports errors and deliberate log lines — from the browser,
 from unhandled request and job failures, and from the app on purpose — to the
-estate's Errors panel. See [Errors](#errors).
+estate's Errors panel. See [Errors](#errors). Since 0.8 it also reports a
+phone running a page whose files a deploy has deleted — see
+[Stale pages](#stale-pages).
 
 ## Install
 
 ```ruby
-gem "estate-monitor", github: "mukco/estate-monitor", tag: "v0.7.0"
+gem "estate-monitor", github: "mukco/estate-monitor", tag: "v0.8.0"
 ```
 
 ```ruby
@@ -210,6 +212,8 @@ Estate::Monitor.report ───────────────┘         
 | `current_user_id` | `nil` | `->(request) { … }` → the signed-in user's id or nil. Raising means nil. |
 | `ignored_exceptions` | `RoutingError`, `RecordNotFound`, `InvalidAuthenticityToken`, `UnknownFormat` | Class names; subclasses match too |
 | `release` | the runtime sha (`SOURCE_VERSION` / `KAMAL_VERSION` / `/rails/.git-sha`) | string or lambda |
+| `report_stale_assets` | `true` | See [Stale pages](#stale-pages) |
+| `stale_asset_paths` | `["/assets/"]` | Prefixes of the app's own built files |
 
 Apps behind the WARP `HTTPS_PROXY` must add `estate.edwardsfamily.app` to
 `NO_PROXY`; until they do, `errors.last_error` in the metrics says why pushes
@@ -288,6 +292,54 @@ Undelivered events, oldest first, at most 100 / 256 KB per scrape. Each is
 shown to two scrapes and then dropped from the buffer — the second showing
 covers a scrape whose response was lost. Pushes keep retrying meanwhile, so
 the estate must dedupe on `event_id`.
+
+## Stale pages
+
+Added in 0.8. A phone that restores an old `index.html` from its cache asks
+for the JS and CSS that page was built with; if a later deploy deleted them,
+every one is a 404, no app code runs, and the browser reporter never loads.
+The 404 is a `RoutingError`, which is on the ignore list (bots probe for files
+all day), so until 0.8 the server said nothing either. That was Football's
+white screen on 2026-10-09.
+
+The engine now inserts `Estate::Monitor::StaleAssets` just below
+`ActionDispatch::Static` (at the top of the stack when the app serves no
+files) — nothing to mount. When a request's final answer is a 404 and
+
+- it is a `GET` or `HEAD`,
+- the path starts with one of `stale_asset_paths` (default `/assets/`, Vite's
+  output) and ends `.js`, `.mjs` or `.css`,
+- the User-Agent contains `Mozilla/` and none of `bot`, `crawler`, `spider`,
+  `curl`, `python`, `go-http`,
+
+it is reported as a client error. A stale page asks for several files at
+once, so the first 404 from an address opens a five-second window, the rest
+join it, and the window closes into **one** event listing every path (at most
+20). Opening a window counts against the browser endpoint's limit, 30 a minute
+per address. Windows are closed by a background thread, so a request does
+nothing but a status check — and for a 404 a prefix check and a hash append;
+nothing here can raise into a request.
+
+```json
+{
+  "level": "error", "source": "client", "fingerprint": "stale-asset",
+  "message": "A phone asked for /assets/index-wQ90q-cT.js, which this deploy no longer has",
+  "context": {
+    "kind": "stale_asset",
+    "path": "/assets/index-wQ90q-cT.js",
+    "paths": ["/assets/index-wQ90q-cT.js", "/assets/index-BXpUa--r.css"],
+    "ua": "Mozilla/5.0 (iPhone; …)", "referer": "https://…/", "accept": "*/*",
+    "ip_hash": "3f9c…", "release": "<sha>"
+  }
+  // + the usual stamps: event_id, app, release, user_id, ip_hash, received_at, host, occurred_at
+}
+```
+
+One group per app (`stale-asset`), whatever the paths. Turn it off with
+`config.report_stale_assets = false`; add a prefix with
+`config.stale_asset_paths = ["/assets/", "/packs/"]`. An app whose SPA
+catch-all answers `/assets/*.js` with `index.html` and a 200 is never seen —
+keep the catch-all off the asset prefix.
 
 ## Client
 

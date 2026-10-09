@@ -9,6 +9,7 @@ require_relative "monitor/sources/solid_queue"
 require_relative "monitor/sources/latency"
 require_relative "monitor/errors"
 require_relative "monitor/errors_app"
+require_relative "monitor/stale_assets"
 
 module Estate
   module Monitor
@@ -33,6 +34,16 @@ module Estate
     mattr_accessor :enabled, :current_user_id, :release
     mattr_writer :estate_url, :ignored_exceptions
 
+    # 2026-10-09, stale pages (see StaleAssets):
+    #
+    #   report_stale_assets — a browser 404ing on one of the app's own built
+    #                         JS/CSS files is reported as a client error.
+    #   stale_asset_paths   — the prefixes that are the app's own build
+    #                         output. Vite's is /assets/; anything outside the
+    #                         list is a stranger's guess, not a stale page.
+    mattr_accessor :report_stale_assets, default: true
+    mattr_writer :stale_asset_paths
+
     # The README has always shown this block; until now it raised NoMethodError,
     # which is why every app sets the accessors one by one instead.
     def self.configure
@@ -41,6 +52,10 @@ module Estate
 
     def self.estate_url
       class_variable_get(:@@estate_url).presence || ENV["ESTATE_URL"].presence || "https://estate.edwardsfamily.app"
+    end
+
+    def self.stale_asset_paths
+      class_variable_get(:@@stale_asset_paths) || StaleAssets::DEFAULT_PATHS
     end
 
     def self.ignored_exceptions
