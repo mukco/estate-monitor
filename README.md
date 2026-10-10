@@ -13,7 +13,7 @@ phone running a page whose files a deploy has deleted — see
 ## Install
 
 ```ruby
-gem "estate-monitor", github: "mukco/estate-monitor", tag: "v0.8.0"
+gem "estate-monitor", github: "mukco/estate-monitor", tag: "v0.9.0"
 ```
 
 ```ruby
@@ -214,6 +214,7 @@ Estate::Monitor.report ───────────────┘         
 | `release` | the runtime sha (`SOURCE_VERSION` / `KAMAL_VERSION` / `/rails/.git-sha`) | string or lambda |
 | `report_stale_assets` | `true` | See [Stale pages](#stale-pages) |
 | `stale_asset_paths` | `["/assets/"]` | Prefixes of the app's own built files |
+| `recover_stale_scripts` | `true` | Answer a missing script with one that reloads the page — see [Stale pages](#stale-pages) |
 
 Apps behind the WARP `HTTPS_PROXY` must add `estate.edwardsfamily.app` to
 `NO_PROXY`; until they do, `errors.last_error` in the metrics says why pushes
@@ -340,6 +341,20 @@ One group per app (`stale-asset`), whatever the paths. Turn it off with
 `config.stale_asset_paths = ["/assets/", "/packs/"]`. An app whose SPA
 catch-all answers `/assets/*.js` with `index.html` and a 200 is never seen —
 keep the catch-all off the asset prefix.
+
+### The way back (0.9)
+
+Reporting did not end the white screen: Safari reopens a tab from its own copy
+of a page several deploys old, which predates anything on the page that could
+recover, and Kamal's asset bridging keeps only one deploy back. So when the
+missing file is a **script** (`.js`, `.mjs`) from a browser, the answer is not a
+404 but a 200 `text/javascript`, `cache-control: no-store`, `x-estate-stale:
+recover` — about 500 bytes that reload the page (fetching today's
+`index.html`). If that page is stale too, the second try loads it under a new
+address (`?_fresh=…`); a third try within 30 seconds stops, so it can never
+loop. Stylesheets stay 404s. The report goes out exactly as before, and the
+answer is given even with `report_stale_assets = false`. Turn it off with
+`recover_stale_scripts = false`.
 
 ## Client
 
