@@ -35,17 +35,19 @@ RSpec.describe Estate::Monitor::StaleAssets, :errors do
   end
 
   it "reports a browser's 404 for a built asset as one client error" do
-    response = asset("/assets/index-wQ90q-cT.js")
+    response = asset("/assets/index-BXpUa--r.css")
     expect(response.status).to eq(404)
+    asset("/assets/index-wQ90q-cT.js")
 
     event = stale_events.sole
     expect(event).to include(
       "level" => "error", "source" => "client", "fingerprint" => "stale-asset",
-      "message" => "A phone asked for /assets/index-wQ90q-cT.js, which this deploy no longer has",
+      "message" => "A phone asked for /assets/index-BXpUa--r.css, which this deploy no longer has",
       "app" => "Spec", "release" => "abc123", "user_id" => nil
     )
     expect(event["context"]).to include(
-      "kind" => "stale_asset", "path" => "/assets/index-wQ90q-cT.js", "paths" => ["/assets/index-wQ90q-cT.js"],
+      "kind" => "stale_asset", "path" => "/assets/index-BXpUa--r.css",
+      "paths" => ["/assets/index-BXpUa--r.css", "/assets/index-wQ90q-cT.js"],
       "ua" => IPHONE, "referer" => "https://football.edwardsfamily.app/", "accept" => "*/*", "release" => "abc123"
     )
     expect(event["context"]["ip_hash"]).to match(/\A\h{12}\z/).and eq(event["ip_hash"])
@@ -170,18 +172,59 @@ RSpec.describe Estate::Monitor::StaleAssets, :errors do
     expect(coalescer.pending).to eq(0)
   end
 
-  it "never turns a 404 into anything else" do
+  it "never fails the request when the reporter breaks" do
     allow(coalescer).to receive(:add).and_raise("reporter bug")
-    expect(asset("/assets/index-wQ90q-cT.js").status).to eq(404)
+    expect(asset("/assets/index-BXpUa--r.css").status).to eq(404)
+    expect(asset("/assets/index-wQ90q-cT.js").status).to eq(200)
   end
 
-  it "reports and re-raises a RoutingError that nothing turned into a 404" do
+  it "reports a RoutingError that nothing turned into a 404, and still answers a script" do
     raising = ->(env) { raise ActionController::RoutingError, "No route matches [GET] \"#{env['PATH_INFO']}\"" }
     middleware = described_class.new(raising)
-    env = Rack::MockRequest.env_for("/assets/index-wQ90q-cT.js", "HTTP_USER_AGENT" => IPHONE, "REMOTE_ADDR" => "203.0.113.7")
+    env = ->(path) { Rack::MockRequest.env_for(path, "HTTP_USER_AGENT" => IPHONE, "REMOTE_ADDR" => "203.0.113.7") }
 
-    expect { middleware.call(env) }.to raise_error(ActionController::RoutingError)
+    expect { middleware.call(env.("/assets/index-BXpUa--r.css")) }.to raise_error(ActionController::RoutingError)
+    expect(middleware.call(env.("/assets/index-wQ90q-cT.js"))[0]).to eq(200)
     expect(stale_events.size).to eq(1)
+  end
+
+  # 0.9: Safari reopening a tab several deploys old white-screened even with
+  # the report in, because nothing on that page could recover.
+  describe "answering a missing script" do
+    after { Estate::Monitor.recover_stale_scripts = true }
+
+    it "with a script that loads the page again, never cached, and still reports" do
+      response = asset("/assets/index-wQ90q-cT.js")
+
+      expect(response.status).to eq(200)
+      expect(response.headers["content-type"]).to start_with("text/javascript")
+      expect(response.headers["cache-control"]).to eq("no-store")
+      expect(response.body).to include("location.reload()", "_fresh", "sessionStorage")
+      expect(stale_events.sole["context"]["paths"]).to eq(["/assets/index-wQ90q-cT.js"])
+    end
+
+    it "for a module and a HEAD too, with no body for HEAD" do
+      expect(asset("/assets/vendor-x1.mjs").status).to eq(200)
+      head = asset("/assets/index-wQ90q-cT.js", method: "HEAD")
+      expect([head.status, head.body]).to eq([200, ""])
+    end
+
+    it "leaves stylesheets, scripts that exist, strangers and other paths alone" do
+      expect(asset("/assets/index-BXpUa--r.css").status).to eq(404)
+      expect(asset("/assets/index-wQ90q-cT.js", ua: "curl/8.0").status).to eq(404)
+      expect(asset("/packs/index-wQ90q-cT.js").status).to eq(404)
+    end
+
+    it "answers even when reporting is off — the page still needs the way back" do
+      Estate::Monitor.report_stale_assets = false
+      expect(asset("/assets/index-wQ90q-cT.js").status).to eq(200)
+      expect(stale_events).to be_empty
+    end
+
+    it "is off when recover_stale_scripts is false" do
+      Estate::Monitor.recover_stale_scripts = false
+      expect(asset("/assets/index-wQ90q-cT.js").status).to eq(404)
+    end
   end
 
   it "is in the stack just below ActionDispatch::Static" do

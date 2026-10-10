@@ -41,7 +41,11 @@ module Estate
     #   stale_asset_paths   — the prefixes that are the app's own build
     #                         output. Vite's is /assets/; anything outside the
     #                         list is a stranger's guess, not a stale page.
+    #   recover_stale_scripts — and answers a missing *script* with one that
+    #                         loads the page again (0.9), rather than a 404
+    #                         that leaves a white screen.
     mattr_accessor :report_stale_assets, default: true
+    mattr_accessor :recover_stale_scripts, default: true
     mattr_writer :stale_asset_paths
 
     # The README has always shown this block; until now it raised NoMethodError,
